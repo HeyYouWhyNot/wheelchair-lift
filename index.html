@@ -14,19 +14,28 @@
   canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; outline: none; }
   canvas#view.dragging { cursor: grabbing; }
 
-  .bar {
+  .dock {
     position: fixed; left: 50%; transform: translateX(-50%);
     bottom: max(18px, env(safe-area-inset-bottom));
-    width: min(440px, calc(100vw - 32px));
-    display: flex; align-items: center; gap: 12px;
-    padding: 8px 16px 8px 8px; border-radius: 999px;
-    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+    width: min(640px, calc(100vw - 32px));
+    display: flex; flex-wrap: wrap-reverse; justify-content: center; align-items: center; gap: 10px;
+    pointer-events: none;
+  }
+  .dock > * { pointer-events: auto; }
+  .bar, .chairbtn {
+    border-radius: 999px; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
     -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
     opacity: .6; transition: opacity .2s ease;
     user-select: none; -webkit-user-select: none;
   }
-  .bar:hover, .bar:focus-within, .bar.active { opacity: 1; }
-  .bar[hidden] { display: none; }
+  .bar { flex: 1 1 300px; max-width: 440px; display: flex; align-items: center; gap: 12px; padding: 8px 16px 8px 8px; }
+  .bar:hover, .bar:focus-within, .bar.active, .chairbtn:hover, .chairbtn:focus-visible { opacity: 1; }
+  .bar[hidden], .chairbtn[hidden] { display: none; }
+  .chairbtn {
+    flex: none; height: 52px; min-width: 164px; padding: 0 18px;
+    font: inherit; font-size: 13px; letter-spacing: .01em; color: var(--ink); cursor: pointer;
+  }
+  .chairbtn:focus-visible { outline: 2px solid rgba(255,255,255,.75); outline-offset: 3px; }
 
   .play {
     flex: none; width: 34px; height: 34px; border-radius: 50%; border: 0; padding: 0;
@@ -68,7 +77,7 @@
   .hint.gone { opacity: 0; }
   .msg { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--ink-dim); pointer-events: none; }
   .msg:empty { display: none; }
-  @media (prefers-reduced-motion: reduce) { .bar, .hint, .play { transition: none; } }
+  @media (prefers-reduced-motion: reduce) { .bar, .chairbtn, .hint, .play { transition: none; } }
 </style>
 </head>
 <body>
@@ -76,6 +85,7 @@
 <div class="hint" id="hint">Drag to rotate · Scroll to zoom</div>
 <div class="msg" id="msg" role="status">Loading model…</div>
 
+<div class="dock">
 <div class="bar" id="bar" hidden>
   <button class="play" id="play" type="button" aria-pressed="false" aria-label="Play extend and retract cycle" title="Play / pause (Space)">
     <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11a.6.6 0 0 0 .92.5l8.6-5.5a.6.6 0 0 0 0-1L4.92 2a.6.6 0 0 0-.92.5z"/></svg>
@@ -85,6 +95,8 @@
     <input id="scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Lift extension" aria-valuetext="">
     <div class="ends" aria-hidden="true"><span>Retracted</span><span>Extended</span></div>
   </div>
+</div>
+<button class="chairbtn" id="chair" type="button" hidden>Add wheelchair</button>
 </div>
 
 <script>
@@ -96,6 +108,7 @@ const bar = document.getElementById('bar');
 const playBtn = document.getElementById('play');
 const scrub = document.getElementById('scrub');
 const hint = document.getElementById('hint');
+const chairBtn = document.getElementById('chair');
 
 const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
 if (!gl) { msg.textContent = 'This browser cannot show the 3D model (WebGL 2 is not available).'; return; }
@@ -131,6 +144,18 @@ function rigid(R, p) {
 const I3 = [1,0,0, 0,1,0, 0,0,1];
 const FLIP = [-1,0,0, 0,-1,0, 0,0,1];                       /* half turn about Z: pins on the far side */
 const rotXZ = a => { const c = Math.cos(a), s = Math.sin(a); return [c,0,-s, 0,1,0, s,0,c]; };
+const rotZ = a => { const c = Math.cos(a), s = Math.sin(a); return [c,-s,0, s,c,0, 0,0,1]; };
+function rotAxis(k, a) {                                     /* rotation by a about unit axis k */
+  const c = Math.cos(a), s = Math.sin(a), t = 1 - c, [x, y, z] = k;
+  return [t*x*x + c, t*x*y - s*z, t*x*z + s*y,  t*x*y + s*z, t*y*y + c, t*y*z - s*x,  t*x*z - s*y, t*y*z + s*x, t*z*z + c];
+}
+function m3mul(a, b) {
+  const o = new Array(9);
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) o[r*3+c] = a[r*3]*b[c] + a[r*3+1]*b[3+c] + a[r*3+2]*b[6+c];
+  return o;
+}
+const m3vec = (m, v) => [m[0]*v[0] + m[1]*v[1] + m[2]*v[2], m[3]*v[0] + m[4]*v[1] + m[5]*v[2], m[6]*v[0] + m[7]*v[1] + m[8]*v[2]];
+const add = (a, b, k = 1) => [a[0] + b[0]*k, a[1] + b[1]*k, a[2] + b[2]*k];
 
 /* ---------- shaders ---------- */
 const VS = `#version 300 es
@@ -175,7 +200,7 @@ void main(){
   vec3 diffC = uBase * (1.0 - uMetal);
   vec3 F0 = mix(vec3(0.05), uBase, uMetal);
   float ndl = max(dot(N, uKeyDir), 0.0);
-  float sh = shadowAt(vLPos, 0.0018 + 0.004 * (1.0 - ndl));
+  float sh = shadowAt(vLPos, 0.0012 + 0.0026 * (1.0 - ndl));
   vec3 amb = mix(vec3(0.115, 0.12, 0.13), vec3(0.23, 0.235, 0.245), N.z * 0.5 + 0.5);
   float fill = max(dot(N, uFillDir), 0.0);
   vec3 col = diffC * (amb + vec3(0.37) * ndl * sh + vec3(0.12) * fill);
@@ -198,9 +223,9 @@ precision highp float;
 void main(){}`;
 const VS_GROUND = `#version 300 es
 layout(location=0) in vec2 aXY;
-uniform mat4 uVP, uLightVP; uniform float uZ, uSize;
+uniform mat4 uVP, uLightVP; uniform float uZ, uSize; uniform vec2 uCenter;
 out vec4 vLPos; out vec2 vXY;
-void main(){ vec4 w = vec4(aXY * uSize, uZ, 1.0); vXY = aXY; vLPos = uLightVP * w; gl_Position = uVP * w; }`;
+void main(){ vec4 w = vec4(aXY * uSize + uCenter, uZ, 1.0); vXY = aXY; vLPos = uLightVP * w; gl_Position = uVP * w; }`;
 const FS_GROUND = `#version 300 es
 precision highp float;
 in vec4 vLPos; in vec2 vXY;
@@ -208,7 +233,7 @@ uniform float uFade;
 out vec4 frag;
 ${SHADOW_FN}
 void main(){
-  float a = (1.0 - shadowAt(vLPos, 0.002)) * 0.22 * uFade * (1.0 - smoothstep(0.55, 1.0, length(vXY)));
+  float a = (1.0 - shadowAt(vLPos, 0.0014)) * 0.22 * uFade * (1.0 - smoothstep(0.55, 1.0, length(vXY)));
   frag = vec4(0.0, 0.0, 0.0, a);
 }`;
 
@@ -254,13 +279,12 @@ function buildParts() {
   }
 }
 
-async function loadModel() {
-  const res = await fetch('lift.bin');
+async function loadBin(url) {
+  const res = await fetch(url);
   if (!res.ok) throw new Error('HTTP ' + res.status);
   const buf = await res.arrayBuffer();
   const hlen = new DataView(buf).getUint32(0, true);
   const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
-  K = head.constants;
   const body = 4 + hlen;
   for (const [name, m] of Object.entries(head.meshes)) {
     const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
@@ -274,7 +298,13 @@ async function loadModel() {
     meshes[name] = { vao, count: m.count, mat };
   }
   gl.bindVertexArray(null);
-  buildParts();
+  return head;
+}
+async function loadModel() { K = (await loadBin('lift.bin')).constants; buildParts(); }
+async function loadChair() {                                 /* already scaled and placed so that it sits under the lift */
+  const head = await loadBin('chair.bin');
+  CHAIR = { pivot: head.pivot, groundZ: head.bboxMin[2] - 0.4 };
+  FOCUS = sub(head.pivot, HOME.target);
 }
 
 /* ---------- GL resources ---------- */
@@ -305,9 +335,9 @@ function initGL() {
   if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) shadowFBO = null;   /* fall back to no shadows */
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-  const c = [0, 0, 95], r = 330, d = 900;                    /* light volume covers the lift at full height */
+  const c = [-29, 0, -52], r = 650, d = 1500;                /* light volume covers the lift and the wheelchair under it */
   const eye = [c[0] + KEY_DIR[0] * d, c[1] + KEY_DIR[1] * d, c[2] + KEY_DIR[2] * d];
-  lightVP = mul(ortho(-r, r, -r, r, d - 480, d + 480), lookAt(eye, c, [0, 0, 1]));
+  lightVP = mul(ortho(-r, r, -r, r, d - 760, d + 760), lookAt(eye, c, [0, 0, 1]));
   gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
 }
 
@@ -321,18 +351,23 @@ function fitDistance() {                                     /* keep the whole t
   const half = Math.min(FOV / 2, Math.atan(Math.tan(FOV / 2) * aspect));
   return 215 / Math.sin(half) * 1.2;
 }
-function camEye() {
-  const ce = Math.cos(cam.el);
-  return [cam.target[0] + cam.dist * ce * Math.cos(cam.az), cam.target[1] + cam.dist * ce * Math.sin(cam.az), cam.target[2] + cam.dist * Math.sin(cam.el)];
+let CHAIR = null, FOCUS = [0, 0, 0];
+const DOCK_ZOOM = 2.55;                                      /* how far the view pulls back to frame lift + wheelchair */
+let focus = 0;                                               /* 0 = framing the lift alone, 1 = framing lift + wheelchair */
+function viewAt(f) {                                         /* the user's orbit, shifted and pulled back by f */
+  const target = add(cam.target, FOCUS, f), dist = cam.dist * (1 + f * (DOCK_ZOOM - 1)), ce = Math.cos(cam.el);
+  const eye = [target[0] + dist * ce * Math.cos(cam.az), target[1] + dist * ce * Math.sin(cam.az), target[2] + dist * Math.sin(cam.el)];
+  const fwd = norm(sub(target, eye)), right = norm(cross(fwd, [0, 0, 1])), up = cross(right, fwd);
+  return { target, dist, eye, fwd, right, up };
 }
 
 /* ---------- state ---------- */
 let u = 0.457;                 /* 0 = fully retracted, 1 = fully extended; starts at the pose saved in Fusion */
 let playing = false, scrubbing = false, phase = 0, lastT = 0;
 const PERIOD = 7000;           /* ms for one retract → extend → retract cycle */
-let dirty = true, poseDirty = true, models = [], raf = 0;
+let models = [], raf = 0;
 
-function requestFrame() { dirty = true; if (!raf) raf = requestAnimationFrame(frame); }
+function requestFrame() { if (!raf) raf = requestAnimationFrame(frame); }
 
 function resize() {
   if (!camTouched) { HOME.dist = fitDistance(); cam.dist = HOME.dist; }
@@ -341,7 +376,101 @@ function resize() {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
 }
 
-function drawParts(prog) {
+/* ---------- wheelchair: fly in, dock, pop off ---------- */
+const TAU = Math.PI * 2;
+const lift = { z: 0, vz: 0, spin: 0, spinV: 0, spinTarget: 0 };   /* the lift's own hop and spin, on top of its mechanism */
+const LIFT_G = 2640, LIFT_BOUNCE = 0.28, JUMP = 1320, HOP = 1000, SPIN_W = 9.5;
+const FLY_TIME = 0.8, FALL_G = 2500;
+const chairs = [];             /* usually one; a dismissed chair keeps falling while the next one can already be called */
+let wantChair = false, lastHue = Math.random();
+let groundA = 1, groundDock = false;                         /* ground shadow fades out during the acrobatics */
+
+function nextColor() {                                       /* a fresh hue every time, never close to the last one */
+  do lastHue = (lastHue + 0.2 + Math.random() * 0.6) % 1; while (Math.abs(lastHue - 0.115) < 0.075);   /* and never the lift's own gold */
+  const h = lastHue * 6, s = 0.72, l = 0.5, c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(h % 2 - 1)), m = l - c / 2;
+  const rgb = h < 1 ? [c, x, 0] : h < 2 ? [x, c, 0] : h < 3 ? [0, c, x] : h < 4 ? [0, x, c] : h < 5 ? [x, 0, c] : [c, 0, x];
+  const lin = rgb.map(v => Math.pow(v + m, 2.2)), Y = 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+  const k = Y < 0.17 ? (0.17 - Y) / (1 - Y) : 0, d = Y > 0.3 ? 0.3 / Y : 1;       /* even out brightness so blues are not murky and yellows not glaring */
+  return lin.map(v => (v + (1 - v) * k) * d);
+}
+function chairMatrix(c) { return rigid(c.R, sub(c.pos, m3vec(c.R, CHAIR.pivot))); }
+
+function addChair() {
+  wantChair = true;
+  const v = viewAt(1), below = 2.4 * v.dist * Math.tan(FOV / 2) + 650, a = Math.random() * TAU;
+  chairs.push({
+    mode: 'in', t: 0, color: nextColor(), pos: add(CHAIR.pivot, v.up, -below), R: I3, vel: [0, 0, 0],
+    from: [-v.up[0] * below, -v.up[1] * below, -v.up[2] * below],            /* starts below the bottom edge of the screen */
+    spin: (Math.random() < 0.5 ? -1 : 1) * Math.PI * (2.5 + Math.random()),
+    tiltAxis: [Math.cos(a), Math.sin(a), 0], tilt: 0.7 + Math.random() * 0.5
+  });
+  if (lift.z < 200) lift.vz = JUMP;                          /* the lift jumps, spins once and comes down on the seat */
+  lift.spinTarget += (Math.random() < 0.5 ? -1 : 1) * TAU;
+}
+function letGo(c) {                                        /* hand the chair over to gravity */
+  const v = viewAt(focus), docked = c.mode === 'docked', side = Math.random() < 0.5 ? -1 : 1;
+  c.mode = 'fall'; c.t = docked ? 0 : 0.5;
+  c.g = norm([-v.up[0] * 0.5, -v.up[1] * 0.5, -1 - v.up[2] * 0.5]).map(k => k * FALL_G);   /* down, biased towards the bottom of the screen */
+  c.vel = docked ? [0, 0, 150] : c.vel.map(k => k * 0.2);  /* a small pop if it was seated; most of its speed is lost if caught mid-flight */
+  c.kick = add([0, 0, 0], v.right, side * (260 + Math.random() * 240));
+  c.axis = norm(add(add(v.fwd, v.right, Math.random() - 0.5), [0, 0, 1], Math.random() - 0.5));
+  c.rate = side * (2.4 + Math.random() * 2.2);
+}
+function removeChair() {
+  wantChair = false;
+  for (const c of chairs) if (c.mode !== 'fall') letGo(c);
+  if (lift.z === 0) lift.vz = HOP;                           /* the lift hops clear as the chair pops off */
+}
+function stepChair(c, dt) {
+  c.t += dt;
+  if (c.mode === 'in') {
+    const k = Math.min(1, c.t / FLY_TIME), left = Math.pow(1 - k, 4), prev = c.pos;      /* fast in, soft stop */
+    c.pos = add(CHAIR.pivot, c.from, left);
+    c.vel = dt > 0 ? [(c.pos[0] - prev[0]) / dt, (c.pos[1] - prev[1]) / dt, (c.pos[2] - prev[2]) / dt] : c.vel;
+    c.R = m3mul(rotZ(c.spin * left), rotAxis(c.tiltAxis, c.tilt * left));
+    if (k >= 1) { c.mode = 'docked'; c.pos = CHAIR.pivot.slice(); c.R = I3; c.vel = [0, 0, 0]; }
+  } else if (c.mode === 'fall') {
+    const r = Math.min(1, Math.max(0, (c.t - 0.2) / 0.3)), ramp = r * r * (3 - 2 * r);    /* drop clear of the lift before drifting and tumbling */
+    c.vel = add(c.vel, c.g, dt);
+    c.pos = add(add(c.pos, c.vel, dt), c.kick, ramp * dt);
+    c.R = m3mul(rotAxis(c.axis, c.rate * ramp * dt), c.R);
+  }
+}
+function settle(v, goal, rate, dt) { const n = v + (goal - v) * (1 - Math.exp(-rate * dt)); return Math.abs(goal - n) < 6e-4 ? goal : n; }
+function worldBusy() {
+  return lift.z > 0 || lift.vz !== 0 || lift.spin !== lift.spinTarget || chairs.some(c => c.mode !== 'docked')
+      || focus !== focusGoal() || groundA !== groundGoal();
+}
+function focusGoal() { return wantChair || chairs.length ? 1 : 0; }   /* stay pulled back until a dismissed chair has dropped out of view */
+function groundGoal() {
+  return lift.z === 0 && lift.vz === 0 && chairs.length === (wantChair ? 1 : 0) && chairs.every(c => c.mode === 'docked') ? 1 : 0;
+}
+function stepWorld(dt, vp) {
+  const n = Math.max(1, Math.ceil(dt * 120)), h = dt / n;
+  for (let i = 0; i < n; i++) {
+    if (lift.z > 0 || lift.vz !== 0) {                       /* hop with a small bounce on landing */
+      lift.vz -= LIFT_G * h; lift.z += lift.vz * h;
+      if (lift.z <= 0) { lift.z = 0; lift.vz = lift.vz < -150 ? -lift.vz * LIFT_BOUNCE : 0; }
+    }
+    if (lift.spin !== lift.spinTarget) {                     /* critically damped turn towards the target heading */
+      const d = lift.spinTarget - lift.spin;
+      lift.spinV += (SPIN_W * SPIN_W * d - 2 * SPIN_W * lift.spinV) * h; lift.spin += lift.spinV * h;
+      if (Math.abs(lift.spinTarget - lift.spin) < 1e-3 && Math.abs(lift.spinV) < 1e-2) lift.spin = lift.spinTarget = lift.spinV = 0;
+    }
+    for (const c of chairs) stepChair(c, h);
+  }
+  for (let i = chairs.length - 1; i >= 0; i--) {             /* forget chairs that have fallen out of view */
+    const c = chairs[i]; if (c.mode !== 'fall') continue;
+    const p = c.pos, w = vp[3]*p[0] + vp[7]*p[1] + vp[11]*p[2] + vp[15];
+    const x = (vp[0]*p[0] + vp[4]*p[1] + vp[8]*p[2] + vp[12]) / w, y = (vp[1]*p[0] + vp[5]*p[1] + vp[9]*p[2] + vp[13]) / w;
+    if (c.t > 3.5 || (c.t > 0.6 && (w <= 0 || Math.abs(x) > 2.4 || Math.abs(y) > 2.4))) chairs.splice(i, 1);
+  }
+  focus = settle(focus, focusGoal(), 3.4, dt);
+  groundA = settle(groundA, groundGoal(), 6, dt);
+  if (groundA < 0.02) groundDock = wantChair;
+}
+
+function drawScene(prog) {
   for (let i = 0; i < parts.length; i++) {
     const m = meshes[parts[i].mesh];
     gl.uniformMatrix4fv(prog.u.uModel, false, models[i]);
@@ -350,62 +479,71 @@ function drawParts(prog) {
     }
     gl.bindVertexArray(m.vao); gl.drawArrays(gl.TRIANGLES, 0, m.count);
   }
+  if (!chairs.length) return;
+  const m = meshes.chair; gl.bindVertexArray(m.vao);
+  for (const c of chairs) {
+    gl.uniformMatrix4fv(prog.u.uModel, false, chairMatrix(c));
+    if (prog === main) { gl.uniform3fv(prog.u.uBase, c.color); gl.uniform1f(prog.u.uMetal, 0); gl.uniform1f(prog.u.uRough, 0.5); }
+    gl.drawArrays(gl.TRIANGLES, 0, m.count);
+  }
 }
 
 function frame(now) {
   raf = 0;
+  if (!parts.length) return;
+  const dt = lastT ? Math.min(now - lastT, 100) / 1000 : 0; lastT = now;
   if (playing && !scrubbing) {
-    const dt = Math.min(now - (lastT || now), 250); lastT = now;
-    phase = (phase + dt / PERIOD) % 1;
+    phase = (phase + dt * 1000 / PERIOD) % 1;
     u = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
-    syncScrub(); poseDirty = true; dirty = true;
-  } else lastT = 0;
-
-  if (dirty && parts.length) {
-    dirty = false; resize();
-    if (poseDirty) {
-      const th = thetaOf(u);
-      models = parts.map(p => p.at(th));
-      if (shadowFBO) {                                       /* light is fixed, so shadows only change with the pose */
-        gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFBO); gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
-        gl.clear(gl.DEPTH_BUFFER_BIT); gl.useProgram(depth.p);
-        gl.uniformMatrix4fv(depth.u.uLightVP, false, lightVP);
-        gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 4);
-        drawParts(depth);
-        gl.disable(gl.POLYGON_OFFSET_FILL); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      }
-      poseDirty = false;
-    }
-    const eye = camEye();
-    const view = lookAt(eye, cam.target, [0, 0, 1]);
-    const vp = mul(perspective(FOV, canvas.width / canvas.height, Math.max(5, cam.dist * 0.05), cam.dist + 3000), view);
-    gl.viewport(0, 0, canvas.width, canvas.height);
-    gl.clearColor(46 / 255, 52 / 255, 64 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
-
-    const bindShadow = prog => {
-      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
-      gl.uniform1i(prog.u.uShadow, 0); gl.uniform1f(prog.u.uShadowOn, shadowFBO ? 1 : 0); gl.uniform1f(prog.u.uTexel, 1 / SHADOW_SIZE); gl.uniform1f(prog.u.uSpread, prog === ground ? 3.5 : 1.1);
-      gl.uniformMatrix4fv(prog.u.uLightVP, false, lightVP);
-    };
-    gl.useProgram(main.p); bindShadow(main);
-    gl.uniformMatrix4fv(main.u.uVP, false, vp); gl.uniform3fv(main.u.uCam, eye); gl.uniform3fv(main.u.uKeyDir, KEY_DIR);
-    /* fill light rides with the camera (up and to the left) so the model never goes dark as you orbit */
-    const f = norm(sub(cam.target, eye)), s = norm(cross(f, [0, 0, 1])), up = cross(s, f);
-    gl.uniform3fv(main.u.uFillDir, norm([-f[0] - 0.5 * s[0] + 0.5 * up[0], -f[1] - 0.5 * s[1] + 0.5 * up[1], -f[2] - 0.5 * s[2] + 0.5 * up[2]]));
-    drawParts(main);
-
-    const gz = -32.6, above = (eye[2] - gz) / cam.dist;      /* soft ground shadow, hidden when looking from underneath */
-    if (shadowFBO && above > 0) {
-      gl.useProgram(ground.p); bindShadow(ground);
-      gl.uniformMatrix4fv(ground.u.uVP, false, vp); gl.uniform1f(ground.u.uZ, gz); gl.uniform1f(ground.u.uSize, 520);
-      gl.uniform1f(ground.u.uFade, Math.min(1, above * 6));
-      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); gl.disable(gl.CULL_FACE);
-      gl.bindVertexArray(groundVAO); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-      gl.disable(gl.BLEND); gl.depthMask(true); gl.enable(gl.CULL_FACE);
-    }
-    gl.bindVertexArray(null);
+    syncScrub();
   }
-  if (playing && !scrubbing) raf = requestAnimationFrame(frame);
+  resize();
+  const aspect = canvas.width / canvas.height;
+  const camVP = v => mul(perspective(FOV, aspect, Math.max(5, v.dist * 0.04), v.dist + 9000), lookAt(v.eye, v.target, [0, 0, 1]));
+  if (dt > 0 && worldBusy()) stepWorld(dt, camVP(viewAt(focus)));
+
+  const th = thetaOf(u), moved = lift.z !== 0 || lift.spin !== 0;
+  const G = moved ? rigid(rotZ(lift.spin), [0, 0, lift.z]) : null;
+  models = parts.map(p => G ? mul(G, p.at(th)) : p.at(th));
+
+  if (shadowFBO) {                                           /* the light is fixed to the model, so shadows follow the pose only */
+    gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFBO); gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+    gl.clear(gl.DEPTH_BUFFER_BIT); gl.useProgram(depth.p);
+    gl.uniformMatrix4fv(depth.u.uLightVP, false, lightVP);
+    gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 4);
+    drawScene(depth);
+    gl.disable(gl.POLYGON_OFFSET_FILL); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  const v = viewAt(focus), vp = camVP(v);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.clearColor(46 / 255, 52 / 255, 64 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const bindShadow = prog => {
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+    gl.uniform1i(prog.u.uShadow, 0); gl.uniform1f(prog.u.uShadowOn, shadowFBO ? 1 : 0);
+    gl.uniform1f(prog.u.uTexel, 1 / SHADOW_SIZE); gl.uniform1f(prog.u.uSpread, prog === ground ? 2.2 : 1.0);
+    gl.uniformMatrix4fv(prog.u.uLightVP, false, lightVP);
+  };
+  gl.useProgram(main.p); bindShadow(main);
+  gl.uniformMatrix4fv(main.u.uVP, false, vp); gl.uniform3fv(main.u.uCam, v.eye); gl.uniform3fv(main.u.uKeyDir, KEY_DIR);
+  /* fill light rides with the camera (up and to the left) so the model never goes dark as you orbit */
+  gl.uniform3fv(main.u.uFillDir, norm(add(add([-v.fwd[0], -v.fwd[1], -v.fwd[2]], v.right, -0.5), v.up, 0.5)));
+  drawScene(main);
+
+  const gz = groundDock ? CHAIR.groundZ : -32.6, above = (v.eye[2] - gz) / v.dist;      /* soft ground shadow, hidden from underneath */
+  if (shadowFBO && above > 0 && groundA > 0) {
+    gl.useProgram(ground.p); bindShadow(ground);
+    gl.uniformMatrix4fv(ground.u.uVP, false, vp); gl.uniform1f(ground.u.uZ, gz);
+    gl.uniform1f(ground.u.uSize, groundDock ? 1050 : 520); gl.uniform2f(ground.u.uCenter, groundDock ? CHAIR.pivot[0] : 0, 0);
+    gl.uniform1f(ground.u.uFade, Math.min(1, above * 6) * groundA);
+    gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); gl.disable(gl.CULL_FACE);
+    gl.bindVertexArray(groundVAO); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    gl.disable(gl.BLEND); gl.depthMask(true); gl.enable(gl.CULL_FACE);
+  }
+  gl.bindVertexArray(null);
+
+  if ((playing && !scrubbing) || worldBusy()) raf = requestAnimationFrame(frame); else lastT = 0;
 }
 
 /* ---------- scrubber and play button ---------- */
@@ -422,32 +560,36 @@ function setPlaying(on) {
   if (on) {                                                  /* continue from wherever the scrubber is, heading up */
     phase = Math.acos(1 - 2 * Math.min(1, Math.max(0, u))) / (2 * Math.PI);
     if (u > 0.995) phase = 0.5;
-    lastT = 0;
   }
   requestFrame();
 }
 playBtn.addEventListener('click', () => setPlaying(!playing));
 scrub.addEventListener('input', () => {
-  u = scrub.value / 1000; syncScrub(); poseDirty = true;
+  u = scrub.value / 1000; syncScrub();
   if (playing) phase = Math.acos(1 - 2 * u) / (2 * Math.PI);
   requestFrame();
 });
 const scrubStart = () => { scrubbing = true; bar.classList.add('active'); };
-const scrubEnd = () => { if (!scrubbing) return; scrubbing = false; bar.classList.remove('active'); lastT = 0; requestFrame(); };
+const scrubEnd = () => { if (!scrubbing) return; scrubbing = false; bar.classList.remove('active'); requestFrame(); };
 scrub.addEventListener('pointerdown', scrubStart);
 window.addEventListener('pointerup', scrubEnd);
 window.addEventListener('pointercancel', scrubEnd);
 window.addEventListener('keydown', e => {
-  if (e.code === 'Space' && e.target !== playBtn) { e.preventDefault(); setPlaying(!playing); }
+  if (e.code === 'Space' && !(e.target instanceof HTMLButtonElement)) { e.preventDefault(); setPlaying(!playing); }
+});
+chairBtn.addEventListener('click', () => {
+  if (!CHAIR) return;
+  if (wantChair) removeChair(); else addChair();
+  chairBtn.textContent = wantChair ? 'Remove wheelchair' : 'Add wheelchair';
+  requestFrame();
 });
 
 /* ---------- orbit, pan and zoom ---------- */
 const pointers = new Map(); let pinch = null;
 const dismissHint = () => hint.classList.add('gone');
 function pan(dx, dy) {
-  const eye = camEye(), f = norm(sub(cam.target, eye)), s = norm(cross(f, [0, 0, 1])), up = cross(s, f);
-  const k = 2 * cam.dist * Math.tan(FOV / 2) / canvas.clientHeight;
-  for (let i = 0; i < 3; i++) cam.target[i] += (-dx * s[i] + dy * up[i]) * k;
+  const v = viewAt(focus), k = 2 * v.dist * Math.tan(FOV / 2) / canvas.clientHeight;
+  for (let i = 0; i < 3; i++) cam.target[i] += (-dx * v.right[i] + dy * v.up[i]) * k;
 }
 function zoom(factor) { cam.dist = Math.min(4000, Math.max(160, cam.dist * factor)); }
 canvas.addEventListener('pointerdown', e => {
@@ -494,10 +636,11 @@ setTimeout(dismissHint, 7000);
 try { initGL(); } catch (err) { msg.textContent = 'The 3D view could not start on this device.'; console.error(err); return; }
 loadModel().then(() => {
   msg.textContent = ''; bar.hidden = false; syncScrub(); scrub.value = Math.round(u * 1000); requestFrame();
+  return loadChair().then(() => { chairBtn.hidden = false; }, err => console.error('wheelchair not loaded', err));
 }).catch(err => { msg.textContent = 'The model could not be loaded.'; console.error(err); });
 
 /* small hook for automated checks */
-window.__lift = { get u() { return u; }, get playing() { return playing; }, cam };
+window.__lift = { get u() { return u; }, get playing() { return playing; }, cam, lift, chairs, get wantChair() { return wantChair; }, get focus() { return focus; } };
 })();
 </script>
 </body>
