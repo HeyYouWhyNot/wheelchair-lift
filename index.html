@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Wheelchair lift – interactive model</title>
+<meta name="description" content="Interactive 3D model of a scissor-lift mechanism. Drag to rotate, scroll to zoom, scrub to extend and retract.">
+<meta name="theme-color" content="#2e3440">
+<style>
+  :root { --bg: #2e3440; --ink: rgba(255,255,255,.86); --ink-dim: rgba(255,255,255,.5); }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--bg); overflow: hidden; }
+  body { font: 13px/1.3 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); }
+  canvas#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; cursor: grab; outline: none; }
+  canvas#view.dragging { cursor: grabbing; }
+
+  .bar {
+    position: fixed; left: 50%; transform: translateX(-50%);
+    bottom: max(18px, env(safe-area-inset-bottom));
+    width: min(440px, calc(100vw - 32px));
+    display: flex; align-items: center; gap: 12px;
+    padding: 8px 16px 8px 8px; border-radius: 999px;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.1);
+    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+    opacity: .6; transition: opacity .2s ease;
+    user-select: none; -webkit-user-select: none;
+  }
+  .bar:hover, .bar:focus-within, .bar.active { opacity: 1; }
+  .bar[hidden] { display: none; }
+
+  .play {
+    flex: none; width: 34px; height: 34px; border-radius: 50%; border: 0; padding: 0;
+    display: grid; place-items: center; cursor: pointer;
+    color: var(--ink); background: rgba(255,255,255,.12);
+    transition: background .15s ease;
+  }
+  .play:hover { background: rgba(255,255,255,.22); }
+  .play:focus-visible, input[type=range]:focus-visible { outline: 2px solid rgba(255,255,255,.75); outline-offset: 3px; }
+  .play svg { width: 14px; height: 14px; fill: currentColor; display: block; }
+  .play .i-pause, .play[aria-pressed=true] .i-play { display: none; }
+  .play[aria-pressed=true] .i-pause { display: block; }
+
+  .scrub { flex: 1; min-width: 0; display: grid; gap: 1px; padding-top: 2px; }
+  .ends { display: flex; justify-content: space-between; font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-dim); pointer-events: none; }
+
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 18px; margin: 0;
+    background: transparent; cursor: pointer; border-radius: 999px;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px;
+    background: linear-gradient(to right, rgba(255,255,255,.7) var(--fill, 0%), rgba(255,255,255,.2) var(--fill, 0%));
+  }
+  input[type=range]::-moz-range-track { height: 4px; border-radius: 2px; background: rgba(255,255,255,.2); }
+  input[type=range]::-moz-range-progress { height: 4px; border-radius: 2px; background: rgba(255,255,255,.7); }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; margin-top: -5px;
+    border-radius: 50%; border: 0; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4);
+  }
+  input[type=range]::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; border: 0; background: #fff; box-shadow: 0 1px 4px rgba(0,0,0,.4); }
+
+  .hint {
+    position: fixed; left: 50%; top: max(18px, env(safe-area-inset-top)); transform: translateX(-50%);
+    padding: 6px 12px; border-radius: 999px; white-space: nowrap;
+    font-size: 12px; color: var(--ink-dim); background: rgba(255,255,255,.05);
+    pointer-events: none; transition: opacity .6s ease;
+  }
+  .hint.gone { opacity: 0; }
+  .msg { position: fixed; inset: 0; display: grid; place-items: center; padding: 24px; text-align: center; color: var(--ink-dim); pointer-events: none; }
+  .msg:empty { display: none; }
+  @media (prefers-reduced-motion: reduce) { .bar, .hint, .play { transition: none; } }
+</style>
+</head>
+<body>
+<canvas id="view" tabindex="0" aria-label="3D model of the lift. Drag to rotate, scroll to zoom, right-drag to pan."></canvas>
+<div class="hint" id="hint">Drag to rotate · Scroll to zoom</div>
+<div class="msg" id="msg" role="status">Loading model…</div>
+
+<div class="bar" id="bar" hidden>
+  <button class="play" id="play" type="button" aria-pressed="false" aria-label="Play extend and retract cycle" title="Play / pause (Space)">
+    <svg class="i-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5v11a.6.6 0 0 0 .92.5l8.6-5.5a.6.6 0 0 0 0-1L4.92 2a.6.6 0 0 0-.92.5z"/></svg>
+    <svg class="i-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="2" width="3.6" height="12" rx=".8"/><rect x="9.4" y="2" width="3.6" height="12" rx=".8"/></svg>
+  </button>
+  <div class="scrub">
+    <input id="scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Lift extension" aria-valuetext="">
+    <div class="ends" aria-hidden="true"><span>Retracted</span><span>Extended</span></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+(() => {
+const canvas = document.getElementById('view');
+const msg = document.getElementById('msg');
+const bar = document.getElementById('bar');
+const playBtn = document.getElementById('play');
+const scrub = document.getElementById('scrub');
+const hint = document.getElementById('hint');
+
+const gl = canvas.getContext('webgl2', { antialias: true, alpha: false, powerPreference: 'high-performance' });
+if (!gl) { msg.textContent = 'This browser cannot show the 3D model (WebGL 2 is not available).'; return; }
+
+/* ---------- small matrix helpers (column-major, Z is up) ---------- */
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]];
+const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
+const norm = a => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0]/l, a[1]/l, a[2]/l]; };
+function mul(a, b) {
+  const o = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++)
+    o[c*4+r] = a[r]*b[c*4] + a[4+r]*b[c*4+1] + a[8+r]*b[c*4+2] + a[12+r]*b[c*4+3];
+  return o;
+}
+function lookAt(eye, target, up) {
+  const f = norm(sub(target, eye)), s = norm(cross(f, up)), u = cross(s, f);
+  return new Float32Array([s[0], u[0], -f[0], 0,  s[1], u[1], -f[1], 0,  s[2], u[2], -f[2], 0,
+                           -dot(s, eye), -dot(u, eye), dot(f, eye), 1]);
+}
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+  return new Float32Array([f/aspect, 0, 0, 0,  0, f, 0, 0,  0, 0, (far+near)*nf, -1,  0, 0, 2*far*near*nf, 0]);
+}
+function ortho(l, r, b, t, n, f) {
+  return new Float32Array([2/(r-l), 0, 0, 0,  0, 2/(t-b), 0, 0,  0, 0, -2/(f-n), 0,
+                           -(r+l)/(r-l), -(t+b)/(t-b), -(f+n)/(f-n), 1]);
+}
+/* rigid transform from a row-major 3x3 rotation and a translation */
+function rigid(R, p) {
+  return new Float32Array([R[0], R[3], R[6], 0,  R[1], R[4], R[7], 0,  R[2], R[5], R[8], 0,  p[0], p[1], p[2], 1]);
+}
+const I3 = [1,0,0, 0,1,0, 0,0,1];
+const FLIP = [-1,0,0, 0,-1,0, 0,0,1];                       /* half turn about Z: pins on the far side */
+const rotXZ = a => { const c = Math.cos(a), s = Math.sin(a); return [c,0,-s, 0,1,0, s,0,c]; };
+
+/* ---------- shaders ---------- */
+const VS = `#version 300 es
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNor;
+uniform mat4 uVP, uModel, uLightVP;
+out vec3 vPos; out vec3 vNor; out vec4 vLPos;
+void main(){
+  vec4 w = uModel * vec4(aPos, 1.0);
+  vPos = w.xyz; vNor = mat3(uModel) * aNor; vLPos = uLightVP * w;
+  gl_Position = uVP * w;
+}`;
+const SHADOW_FN = `
+uniform highp sampler2DShadow uShadow;
+uniform float uShadowOn, uTexel, uSpread;
+float shadowAt(vec4 lp, float bias){
+  if (uShadowOn < 0.5) return 1.0;
+  vec3 p = lp.xyz / lp.w * 0.5 + 0.5;
+  if (p.x < 0.0 || p.x > 1.0 || p.y < 0.0 || p.y > 1.0 || p.z > 1.0) return 1.0;
+  float s = 0.0;
+  for (int x = -2; x <= 2; x++) for (int y = -2; y <= 2; y++)
+    s += texture(uShadow, vec3(p.xy + vec2(float(x), float(y)) * uTexel * uSpread, p.z - bias));
+  return s / 25.0;
+}`;
+const FS = `#version 300 es
+precision highp float;
+in vec3 vPos; in vec3 vNor; in vec4 vLPos;
+uniform vec3 uCam, uBase, uKeyDir, uFillDir;
+uniform float uMetal, uRough;
+out vec4 frag;
+${SHADOW_FN}
+vec3 env(vec3 d){                                        /* soft studio surround for reflections */
+  float t = clamp(d.z * 0.5 + 0.5, 0.0, 1.0);
+  vec3 c = mix(vec3(0.07, 0.075, 0.085), vec3(0.50, 0.52, 0.56), smoothstep(0.1, 1.0, t));
+  c += vec3(1.1) * pow(max(dot(d, uKeyDir), 0.0), 12.0);
+  c += vec3(0.3) * pow(max(dot(d, normalize(vec3(0.7, 0.5, 0.35))), 0.0), 4.0);
+  return c;
+}
+void main(){
+  vec3 N = normalize(vNor); if (!gl_FrontFacing) N = -N;
+  vec3 V = normalize(uCam - vPos);
+  vec3 diffC = uBase * (1.0 - uMetal);
+  vec3 F0 = mix(vec3(0.05), uBase, uMetal);
+  float ndl = max(dot(N, uKeyDir), 0.0);
+  float sh = shadowAt(vLPos, 0.0018 + 0.004 * (1.0 - ndl));
+  vec3 amb = mix(vec3(0.115, 0.12, 0.13), vec3(0.23, 0.235, 0.245), N.z * 0.5 + 0.5);
+  float fill = max(dot(N, uFillDir), 0.0);
+  vec3 col = diffC * (amb + vec3(0.37) * ndl * sh + vec3(0.12) * fill);
+  float ndv = max(dot(N, V), 0.0);
+  float gloss = 1.0 - uRough;
+  vec3 F = F0 + (1.0 - F0) * pow(1.0 - ndv, 5.0) * gloss * gloss;
+  col += F * env(reflect(-V, N)) * mix(0.55, 1.0, gloss);
+  float shin = mix(12.0, 220.0, gloss * gloss);
+  vec3 H = normalize(uKeyDir + V);
+  col += F * pow(max(dot(N, H), 0.0), shin) * (shin + 8.0) / 25.0 * ndl * sh * 0.35;
+  col = col / (1.0 + 0.15 * col);                        /* gentle highlight roll-off */
+  frag = vec4(pow(col, vec3(1.0 / 2.2)), 1.0);
+}`;
+const VS_DEPTH = `#version 300 es
+layout(location=0) in vec3 aPos;
+uniform mat4 uLightVP, uModel;
+void main(){ gl_Position = uLightVP * uModel * vec4(aPos, 1.0); }`;
+const FS_DEPTH = `#version 300 es
+precision highp float;
+void main(){}`;
+const VS_GROUND = `#version 300 es
+layout(location=0) in vec2 aXY;
+uniform mat4 uVP, uLightVP; uniform float uZ, uSize;
+out vec4 vLPos; out vec2 vXY;
+void main(){ vec4 w = vec4(aXY * uSize, uZ, 1.0); vXY = aXY; vLPos = uLightVP * w; gl_Position = uVP * w; }`;
+const FS_GROUND = `#version 300 es
+precision highp float;
+in vec4 vLPos; in vec2 vXY;
+uniform float uFade;
+out vec4 frag;
+${SHADOW_FN}
+void main(){
+  float a = (1.0 - shadowAt(vLPos, 0.002)) * 0.22 * uFade * (1.0 - smoothstep(0.55, 1.0, length(vXY)));
+  frag = vec4(0.0, 0.0, 0.0, a);
+}`;
+
+function program(vs, fs) {
+  const p = gl.createProgram();
+  for (const [type, src] of [[gl.VERTEX_SHADER, vs], [gl.FRAGMENT_SHADER, fs]]) {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    gl.attachShader(p, s);
+  }
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(p, i).name; u[name] = gl.getUniformLocation(p, name); }
+  return { p, u };
+}
+
+/* ---------- model: five unique meshes, seventeen placed parts ---------- */
+const srgb = hex => [1, 3, 5].map(i => Math.pow(parseInt(hex.slice(i, i + 2), 16) / 255, 2.2));
+const STEEL = { color: [0.20, 0.205, 0.215], metal: 1.0, rough: 0.38 };      /* pins: not stored in the 3MF, matched to the Fusion render */
+const PLASTIC = { metal: 0.0, rough: 0.55 };
+
+let K, meshes = {}, parts = [];
+const TH_MIN = 22 * Math.PI / 180, TH_MAX = 74 * Math.PI / 180;           /* same travel limits as the Fusion joints */
+const thetaOf = u => Math.asin(Math.sin(TH_MIN) + u * (Math.sin(TH_MAX) - Math.sin(TH_MIN)));   /* even rise in height */
+
+function buildParts() {
+  const { hx, hz, yo, yi, L, t } = K;
+  const arm = (side, layer, dir) => th => rigid(rotXZ(dir * th),
+      [hx + L / 2 * Math.cos(th), side * (yo + layer * t), hz + L / 2 * Math.sin(th)]);
+  const pin = (side, fx, fz, face) => th => rigid(side > 0 ? I3 : FLIP,
+      [hx + fx * L * Math.cos(th), side * face, hz + fz * L * Math.sin(th)]);
+  const rest = th => rigid(I3, [0, 0, L * Math.sin(th)]);
+  parts = [{ mesh: 'base', at: () => rigid(I3, [0, 0, 0]) },
+           { mesh: 'restP', at: rest }, { mesh: 'restN', at: rest }];
+  for (const side of [1, -1]) {
+    parts.push({ mesh: 'arm', at: arm(side, 0.5, 1) }, { mesh: 'arm', at: arm(side, 1.5, -1) });
+    parts.push({ mesh: 'pin', at: pin(side, 0, 0, yi) },       /* base, fixed hole   */
+               { mesh: 'pin', at: pin(side, 1, 0, yi) },       /* base, sliding slot */
+               { mesh: 'pin', at: pin(side, 0, 1, yi) },       /* top, fixed hole    */
+               { mesh: 'pin', at: pin(side, 1, 1, yi) },       /* top, sliding slot  */
+               { mesh: 'pin', at: pin(side, 0.5, 0.5, yo) });  /* centre pivot       */
+  }
+}
+
+async function loadModel() {
+  const res = await fetch('lift.bin');
+  if (!res.ok) throw new Error('HTTP ' + res.status);
+  const buf = await res.arrayBuffer();
+  const hlen = new DataView(buf).getUint32(0, true);
+  const head = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
+  K = head.constants;
+  const body = 4 + hlen;
+  for (const [name, m] of Object.entries(head.meshes)) {
+    const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+    const pos = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, pos);
+    gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(buf, body + m.offset, m.count * 12), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+    const nor = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, nor);
+    gl.bufferData(gl.ARRAY_BUFFER, new Uint8Array(buf, body + m.offset + m.count * 12, m.count * 4), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 3, gl.BYTE, true, 4, 0);
+    const mat = m.color ? { color: srgb(m.color), ...PLASTIC } : STEEL;
+    meshes[name] = { vao, count: m.count, mat };
+  }
+  gl.bindVertexArray(null);
+  buildParts();
+}
+
+/* ---------- GL resources ---------- */
+let main, depth, ground, groundVAO, shadowFBO = null, shadowTex = null;
+const SHADOW_SIZE = 2048;
+const KEY_DIR = norm([-0.42, -0.58, 0.70]);                  /* direction towards the key light, fixed to the model */
+let lightVP;
+
+function initGL() {
+  main = program(VS, FS); depth = program(VS_DEPTH, FS_DEPTH); ground = program(VS_GROUND, FS_GROUND);
+  groundVAO = gl.createVertexArray(); gl.bindVertexArray(groundVAO);
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+
+  shadowTex = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, gl.DEPTH_COMPONENT24, SHADOW_SIZE, SHADOW_SIZE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
+  shadowFBO = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFBO);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.TEXTURE_2D, shadowTex, 0);
+  gl.drawBuffers([gl.NONE]); gl.readBuffer(gl.NONE);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) shadowFBO = null;   /* fall back to no shadows */
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+  const c = [0, 0, 95], r = 330, d = 900;                    /* light volume covers the lift at full height */
+  const eye = [c[0] + KEY_DIR[0] * d, c[1] + KEY_DIR[1] * d, c[2] + KEY_DIR[2] * d];
+  lightVP = mul(ortho(-r, r, -r, r, d - 480, d + 480), lookAt(eye, c, [0, 0, 1]));
+  gl.enable(gl.DEPTH_TEST); gl.enable(gl.CULL_FACE);
+}
+
+/* ---------- camera ---------- */
+const HOME = { az: -2.08, el: 0.36, dist: 1000, target: [0, 0, 88] };
+const cam = { az: HOME.az, el: HOME.el, dist: HOME.dist, target: HOME.target.slice() };
+const FOV = 30 * Math.PI / 180;
+let camTouched = false;
+function fitDistance() {                                     /* keep the whole travel in frame on any screen shape */
+  const aspect = canvas.clientWidth / Math.max(1, canvas.clientHeight);
+  const half = Math.min(FOV / 2, Math.atan(Math.tan(FOV / 2) * aspect));
+  return 215 / Math.sin(half) * 1.2;
+}
+function camEye() {
+  const ce = Math.cos(cam.el);
+  return [cam.target[0] + cam.dist * ce * Math.cos(cam.az), cam.target[1] + cam.dist * ce * Math.sin(cam.az), cam.target[2] + cam.dist * Math.sin(cam.el)];
+}
+
+/* ---------- state ---------- */
+let u = 0.457;                 /* 0 = fully retracted, 1 = fully extended; starts at the pose saved in Fusion */
+let playing = false, scrubbing = false, phase = 0, lastT = 0;
+const PERIOD = 7000;           /* ms for one retract → extend → retract cycle */
+let dirty = true, poseDirty = true, models = [], raf = 0;
+
+function requestFrame() { dirty = true; if (!raf) raf = requestAnimationFrame(frame); }
+
+function resize() {
+  if (!camTouched) { HOME.dist = fitDistance(); cam.dist = HOME.dist; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr)), h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+}
+
+function drawParts(prog) {
+  for (let i = 0; i < parts.length; i++) {
+    const m = meshes[parts[i].mesh];
+    gl.uniformMatrix4fv(prog.u.uModel, false, models[i]);
+    if (prog === main) {
+      gl.uniform3fv(prog.u.uBase, m.mat.color); gl.uniform1f(prog.u.uMetal, m.mat.metal); gl.uniform1f(prog.u.uRough, m.mat.rough);
+    }
+    gl.bindVertexArray(m.vao); gl.drawArrays(gl.TRIANGLES, 0, m.count);
+  }
+}
+
+function frame(now) {
+  raf = 0;
+  if (playing && !scrubbing) {
+    const dt = Math.min(now - (lastT || now), 250); lastT = now;
+    phase = (phase + dt / PERIOD) % 1;
+    u = 0.5 - 0.5 * Math.cos(2 * Math.PI * phase);
+    syncScrub(); poseDirty = true; dirty = true;
+  } else lastT = 0;
+
+  if (dirty && parts.length) {
+    dirty = false; resize();
+    if (poseDirty) {
+      const th = thetaOf(u);
+      models = parts.map(p => p.at(th));
+      if (shadowFBO) {                                       /* light is fixed, so shadows only change with the pose */
+        gl.bindFramebuffer(gl.FRAMEBUFFER, shadowFBO); gl.viewport(0, 0, SHADOW_SIZE, SHADOW_SIZE);
+        gl.clear(gl.DEPTH_BUFFER_BIT); gl.useProgram(depth.p);
+        gl.uniformMatrix4fv(depth.u.uLightVP, false, lightVP);
+        gl.enable(gl.POLYGON_OFFSET_FILL); gl.polygonOffset(2, 4);
+        drawParts(depth);
+        gl.disable(gl.POLYGON_OFFSET_FILL); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      }
+      poseDirty = false;
+    }
+    const eye = camEye();
+    const view = lookAt(eye, cam.target, [0, 0, 1]);
+    const vp = mul(perspective(FOV, canvas.width / canvas.height, Math.max(5, cam.dist * 0.05), cam.dist + 3000), view);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.clearColor(46 / 255, 52 / 255, 64 / 255, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+    const bindShadow = prog => {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, shadowTex);
+      gl.uniform1i(prog.u.uShadow, 0); gl.uniform1f(prog.u.uShadowOn, shadowFBO ? 1 : 0); gl.uniform1f(prog.u.uTexel, 1 / SHADOW_SIZE); gl.uniform1f(prog.u.uSpread, prog === ground ? 3.5 : 1.1);
+      gl.uniformMatrix4fv(prog.u.uLightVP, false, lightVP);
+    };
+    gl.useProgram(main.p); bindShadow(main);
+    gl.uniformMatrix4fv(main.u.uVP, false, vp); gl.uniform3fv(main.u.uCam, eye); gl.uniform3fv(main.u.uKeyDir, KEY_DIR);
+    /* fill light rides with the camera (up and to the left) so the model never goes dark as you orbit */
+    const f = norm(sub(cam.target, eye)), s = norm(cross(f, [0, 0, 1])), up = cross(s, f);
+    gl.uniform3fv(main.u.uFillDir, norm([-f[0] - 0.5 * s[0] + 0.5 * up[0], -f[1] - 0.5 * s[1] + 0.5 * up[1], -f[2] - 0.5 * s[2] + 0.5 * up[2]]));
+    drawParts(main);
+
+    const gz = -32.6, above = (eye[2] - gz) / cam.dist;      /* soft ground shadow, hidden when looking from underneath */
+    if (shadowFBO && above > 0) {
+      gl.useProgram(ground.p); bindShadow(ground);
+      gl.uniformMatrix4fv(ground.u.uVP, false, vp); gl.uniform1f(ground.u.uZ, gz); gl.uniform1f(ground.u.uSize, 520);
+      gl.uniform1f(ground.u.uFade, Math.min(1, above * 6));
+      gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false); gl.disable(gl.CULL_FACE);
+      gl.bindVertexArray(groundVAO); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.disable(gl.BLEND); gl.depthMask(true); gl.enable(gl.CULL_FACE);
+    }
+    gl.bindVertexArray(null);
+  }
+  if (playing && !scrubbing) raf = requestAnimationFrame(frame);
+}
+
+/* ---------- scrubber and play button ---------- */
+function syncScrub() {
+  const v = Math.round(u * 1000);
+  if (!scrubbing) scrub.value = v;
+  scrub.style.setProperty('--fill', (v / 10) + '%');
+  scrub.setAttribute('aria-valuetext', Math.round(u * 100) + '% extended');
+}
+function setPlaying(on) {
+  playing = on;
+  playBtn.setAttribute('aria-pressed', String(on));
+  playBtn.setAttribute('aria-label', on ? 'Pause extend and retract cycle' : 'Play extend and retract cycle');
+  if (on) {                                                  /* continue from wherever the scrubber is, heading up */
+    phase = Math.acos(1 - 2 * Math.min(1, Math.max(0, u))) / (2 * Math.PI);
+    if (u > 0.995) phase = 0.5;
+    lastT = 0;
+  }
+  requestFrame();
+}
+playBtn.addEventListener('click', () => setPlaying(!playing));
+scrub.addEventListener('input', () => {
+  u = scrub.value / 1000; syncScrub(); poseDirty = true;
+  if (playing) phase = Math.acos(1 - 2 * u) / (2 * Math.PI);
+  requestFrame();
+});
+const scrubStart = () => { scrubbing = true; bar.classList.add('active'); };
+const scrubEnd = () => { if (!scrubbing) return; scrubbing = false; bar.classList.remove('active'); lastT = 0; requestFrame(); };
+scrub.addEventListener('pointerdown', scrubStart);
+window.addEventListener('pointerup', scrubEnd);
+window.addEventListener('pointercancel', scrubEnd);
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && e.target !== playBtn) { e.preventDefault(); setPlaying(!playing); }
+});
+
+/* ---------- orbit, pan and zoom ---------- */
+const pointers = new Map(); let pinch = null;
+const dismissHint = () => hint.classList.add('gone');
+function pan(dx, dy) {
+  const eye = camEye(), f = norm(sub(cam.target, eye)), s = norm(cross(f, [0, 0, 1])), up = cross(s, f);
+  const k = 2 * cam.dist * Math.tan(FOV / 2) / canvas.clientHeight;
+  for (let i = 0; i < 3; i++) cam.target[i] += (-dx * s[i] + dy * up[i]) * k;
+}
+function zoom(factor) { cam.dist = Math.min(4000, Math.max(160, cam.dist * factor)); }
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.button === 1 || e.shiftKey });
+  pinch = null; camTouched = true; canvas.classList.add('dragging'); dismissHint(); canvas.focus({ preventScroll: true });
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  if (pointers.size === 1) {
+    if (p.pan) pan(dx, dy);
+    else { cam.az -= dx * 0.0085; cam.el = Math.min(1.55, Math.max(-1.55, cam.el + dy * 0.0085)); }
+  } else if (pointers.size === 2) {                           /* touch: pinch to zoom, two-finger drag to pan */
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    if (pinch) { if (d > 0 && pinch.d > 0) zoom(pinch.d / d); pan(cx - pinch.cx, cy - pinch.cy); }
+    pinch = { d, cx, cy };
+  }
+  requestFrame();
+});
+const release = e => { pointers.delete(e.pointerId); pinch = null; if (!pointers.size) canvas.classList.remove('dragging'); };
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', release);
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+canvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const d = e.deltaMode === 1 ? e.deltaY * 32 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+  camTouched = true; zoom(Math.exp(Math.max(-240, Math.min(240, d)) * 0.0014)); dismissHint(); requestFrame();
+}, { passive: false });
+canvas.addEventListener('dblclick', () => { camTouched = false; Object.assign(cam, { az: HOME.az, el: HOME.el, dist: fitDistance(), target: HOME.target.slice() }); requestFrame(); });
+canvas.addEventListener('keydown', e => {
+  const step = 0.08; camTouched = true;
+  if (e.key === 'ArrowLeft') cam.az += step; else if (e.key === 'ArrowRight') cam.az -= step;
+  else if (e.key === 'ArrowUp') cam.el = Math.min(1.55, cam.el + step); else if (e.key === 'ArrowDown') cam.el = Math.max(-1.55, cam.el - step);
+  else if (e.key === '+' || e.key === '=') zoom(0.9); else if (e.key === '-') zoom(1.1);
+  else return;
+  e.preventDefault(); requestFrame();
+});
+window.addEventListener('resize', requestFrame);
+setTimeout(dismissHint, 7000);
+
+/* ---------- go ---------- */
+try { initGL(); } catch (err) { msg.textContent = 'The 3D view could not start on this device.'; console.error(err); return; }
+loadModel().then(() => {
+  msg.textContent = ''; bar.hidden = false; syncScrub(); scrub.value = Math.round(u * 1000); requestFrame();
+}).catch(err => { msg.textContent = 'The model could not be loaded.'; console.error(err); });
+
+/* small hook for automated checks */
+window.__lift = { get u() { return u; }, get playing() { return playing; }, cam };
+})();
+</script>
+</body>
+</html>
